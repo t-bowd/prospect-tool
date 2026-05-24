@@ -76,21 +76,28 @@ class Business:
 
 def google_text_search(query: str, limit: int) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
-    params = {"query": query, "key": GOOGLE_PLACES_API_KEY}
+    params: dict[str, Any] = {"query": query, "key": GOOGLE_PLACES_API_KEY}
     while True:
-        r = requests.get(PLACES_TEXTSEARCH_URL, params=params, timeout=HTTP_TIMEOUT)
-        r.raise_for_status()
-        data = r.json()
-        status = data.get("status")
+        # next_page_token activation can take a few seconds; retry INVALID_REQUEST.
+        data = None
+        for attempt in range(5):
+            r = requests.get(PLACES_TEXTSEARCH_URL, params=params, timeout=HTTP_TIMEOUT)
+            r.raise_for_status()
+            data = r.json()
+            status = data.get("status")
+            if status == "INVALID_REQUEST" and "pagetoken" in params:
+                time.sleep(2 + attempt)
+                continue
+            break
+        status = data.get("status") if data else "UNKNOWN"
         if status not in ("OK", "ZERO_RESULTS"):
-            raise RuntimeError(f"Places text search failed: {status} {data.get('error_message','')}")
+            raise RuntimeError(f"Places text search failed: {status} {data.get('error_message','') if data else ''}")
         results.extend(data.get("results", []))
         if len(results) >= limit:
             return results[:limit]
         next_token = data.get("next_page_token")
         if not next_token:
             return results
-        # Google requires a short delay before next_page_token becomes valid.
         time.sleep(2)
         params = {"pagetoken": next_token, "key": GOOGLE_PLACES_API_KEY}
 
