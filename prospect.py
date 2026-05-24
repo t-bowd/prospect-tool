@@ -77,29 +77,34 @@ class Business:
 def google_text_search(query: str, limit: int) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     params: dict[str, Any] = {"query": query, "key": GOOGLE_PLACES_API_KEY}
+    is_paginated = False
     while True:
-        # next_page_token activation can take a few seconds; retry INVALID_REQUEST.
         data = None
-        for attempt in range(5):
+        status = "UNKNOWN"
+        for attempt in range(8):
             r = requests.get(PLACES_TEXTSEARCH_URL, params=params, timeout=HTTP_TIMEOUT)
             r.raise_for_status()
             data = r.json()
-            status = data.get("status")
-            if status == "INVALID_REQUEST" and "pagetoken" in params:
-                time.sleep(2 + attempt)
+            status = data.get("status", "UNKNOWN")
+            if status == "INVALID_REQUEST" and is_paginated:
+                time.sleep(3 + attempt)
                 continue
             break
-        status = data.get("status") if data else "UNKNOWN"
         if status not in ("OK", "ZERO_RESULTS"):
-            raise RuntimeError(f"Places text search failed: {status} {data.get('error_message','') if data else ''}")
+            msg = data.get("error_message", "") if data else ""
+            if is_paginated:
+                log.warning("Pagination gave up after retries (%s %s). Returning %d results.", status, msg, len(results))
+                return results
+            raise RuntimeError(f"Places text search failed: {status} {msg}")
         results.extend(data.get("results", []))
         if len(results) >= limit:
             return results[:limit]
         next_token = data.get("next_page_token")
         if not next_token:
             return results
-        time.sleep(2)
+        time.sleep(3)
         params = {"pagetoken": next_token, "key": GOOGLE_PLACES_API_KEY}
+        is_paginated = True
 
 
 def google_place_details(place_id: str) -> dict[str, Any]:
