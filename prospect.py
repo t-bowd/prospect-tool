@@ -167,15 +167,84 @@ def extract_text(html: str) -> str:
     return re.sub(r"\s+", " ", soup.get_text(separator=" ")).strip()
 
 
+COMMON_OWNER_PATHS = [
+    "about", "about-us", "contact", "contact-us",
+    "team", "our-team", "staff", "people",
+    "teachers", "tutors", "instructors", "faculty",
+    "founder", "owner", "director", "principal", "leadership",
+]
+
+# Keywords used to score internal links on the homepage as "likely owner page".
+OWNER_LINK_KEYWORDS = (
+    "owner", "founder", "director", "principal", "ceo", "president",
+    "about", "team", "staff", "people", "leadership", "bio",
+    "teacher", "tutor", "instructor", "faculty", "meet",
+)
+
+MAX_SCRAPE_PAGES = 10
+
+
+def discover_owner_links(homepage_html: str, base: str) -> list[str]:
+    """Return internal URLs whose anchor text or path slug suggests an owner/about page."""
+    soup = BeautifulSoup(homepage_html, "html.parser")
+    base_host = urlparse(base).netloc.lower()
+    scored: list[tuple[int, str]] = []
+    seen: set[str] = set()
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip()
+        if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
+            continue
+        url = urljoin(base + "/", href)
+        parsed = urlparse(url)
+        if parsed.netloc.lower() != base_host:
+            continue
+        url_clean = url.split("#")[0]
+        if url_clean in seen:
+            continue
+        seen.add(url_clean)
+        text = (a.get_text() or "").strip().lower()
+        path = parsed.path.lower()
+        score = sum(1 for kw in OWNER_LINK_KEYWORDS if kw in text or kw in path)
+        if score > 0:
+            scored.append((score, url_clean))
+    scored.sort(key=lambda x: -x[0])
+    return [u for _, u in scored]
+
+
 def scrape_site_text(homepage: str) -> str:
     parsed = urlparse(homepage)
     if not parsed.scheme:
         homepage = "https://" + homepage
         parsed = urlparse(homepage)
     base = f"{parsed.scheme}://{parsed.netloc}"
-    pages = [homepage, urljoin(base + "/", "about"), urljoin(base + "/", "contact")]
+
+    candidates: list[str] = [homepage]
+    candidates.extend(urljoin(base + "/", p) for p in COMMON_OWNER_PATHS)
+
+    # Fetch homepage first to mine for relevant internal links.
+    home_html = ""
+    try:
+        home_html = fetch_url(homepage)
+    except Exception as e:
+        log.debug("Homepage fetch failed %s: %s", homepage, e)
+
+    if home_html:
+        candidates.extend(discover_owner_links(home_html, base))
+
+    # Dedup while preserving order, then cap.
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for u in candidates:
+        if u not in seen:
+            seen.add(u)
+            ordered.append(u)
+    ordered = ordered[:MAX_SCRAPE_PAGES]
+
     chunks: list[str] = []
-    for url in pages:
+    if home_html:
+        chunks.append(f"--- {homepage} ---\n{extract_text(home_html)[:8000]}")
+        ordered = [u for u in ordered if u != homepage]
+    for url in ordered:
         try:
             html = fetch_url(url)
             chunks.append(f"--- {url} ---\n{extract_text(html)[:8000]}")
