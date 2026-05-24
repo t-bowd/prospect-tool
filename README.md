@@ -22,8 +22,11 @@ python3 prospect.py --type "music school" --location "Sydney" --limit 50
 | `--type` | yes | Business category, e.g. `"dental clinic"` |
 | `--location` | yes | City, suburb, or region |
 | `--limit` | no (default 20) | Number of non-university results to return (Google caps at 60) |
+| `--no-dedup` | no | Ignore the seen-list for this run and don't update it |
 
 Output: `results_<type>_<location>_<date>.csv`, sorted by `priority_score` descending. Universities and TAFEs are auto-excluded.
+
+Cross-run dedup: each run records returned `place_id`s to `seen_<type>_<location>.txt` and filters those out next time. Delete the file (or use `--no-dedup`) to start fresh.
 
 ## Scoring
 
