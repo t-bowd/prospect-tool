@@ -410,7 +410,26 @@ def enrich_business(b: Business) -> Business:
     return b
 
 
-def run(business_type: str, location: str, limit: int) -> str:
+def seen_file_path(type_slug: str, loc_slug: str) -> str:
+    return f"seen_{type_slug}_{loc_slug}.txt"
+
+
+def load_seen(path: str) -> set[str]:
+    if not os.path.exists(path):
+        return set()
+    with open(path, "r") as f:
+        return {line.strip() for line in f if line.strip()}
+
+
+def append_seen(path: str, new_ids: list[str]) -> None:
+    if not new_ids:
+        return
+    with open(path, "a") as f:
+        for pid in new_ids:
+            f.write(pid + "\n")
+
+
+def run(business_type: str, location: str, limit: int, no_dedup: bool = False) -> str:
     if not GOOGLE_PLACES_API_KEY:
         raise SystemExit("GOOGLE_PLACES_API_KEY not set")
     if not ABN_LOOKUP_GUID:
@@ -418,8 +437,15 @@ def run(business_type: str, location: str, limit: int) -> str:
     if not GEMINI_API_KEY:
         log.warning("GEMINI_API_KEY not set — owner extraction will fail per business")
 
+    type_slug = re.sub(r"[^a-z0-9]+", "_", business_type.lower()).strip("_")
+    loc_slug = re.sub(r"[^a-z0-9]+", "_", location.lower()).strip("_")
+    seen_path = seen_file_path(type_slug, loc_slug)
+    seen = set() if no_dedup else load_seen(seen_path)
+    if seen:
+        log.info("Loaded %d previously-seen place_ids from %s", len(seen), seen_path)
+
     query = f"{business_type} in {location}"
-    # Over-fetch so university exclusions don't shrink the final count below `limit`.
+    # Over-fetch so university exclusions and dedup don't shrink the final count below `limit`.
     # Places text search caps at 60 (3 pages of 20).
     fetch_budget = min(60, max(limit * 3, limit + 10))
     log.info("Searching Google Places: %s (fetching up to %d candidates)", query, fetch_budget)
@@ -427,24 +453,34 @@ def run(business_type: str, location: str, limit: int) -> str:
     log.info("Found %d candidate places", len(places))
 
     rows: list[dict[str, Any]] = []
-    skipped = 0
+    new_place_ids: list[str] = []
+    skipped_uni = 0
+    skipped_seen = 0
     for place in places:
         if len(rows) >= limit:
             break
+        pid = place.get("place_id", "")
+        if pid and pid in seen:
+            skipped_seen += 1
+            continue
         name = place.get("name", "?")
         log.info("[%d/%d accepted] %s", len(rows) + 1, limit, name)
         b = fetch_place_details(place)
         if is_university(b.business_name, b.website):
-            skipped += 1
+            skipped_uni += 1
             log.info("  skip (university/edu): %s", b.business_name)
             continue
         b = enrich_business(b)
         d = asdict(b)
         d.pop("_errors", None)
         rows.append(d)
+        if pid:
+            new_place_ids.append(pid)
 
-    if skipped:
-        log.info("Skipped %d university/edu results", skipped)
+    if skipped_uni:
+        log.info("Skipped %d university/edu results", skipped_uni)
+    if skipped_seen:
+        log.info("Skipped %d previously-seen results", skipped_seen)
 
     df = pd.DataFrame(rows)
     columns = [
@@ -456,12 +492,15 @@ def run(business_type: str, location: str, limit: int) -> str:
     df = df[columns]
     df = df.sort_values("priority_score", ascending=False)
 
-    type_slug = re.sub(r"[^a-z0-9]+", "_", business_type.lower()).strip("_")
-    loc_slug = re.sub(r"[^a-z0-9]+", "_", location.lower()).strip("_")
     today = date.today().isoformat()
     out_path = f"results_{type_slug}_{loc_slug}_{today}.csv"
     df.to_csv(out_path, index=False)
     log.info("Wrote %d rows to %s", len(df), out_path)
+
+    if not no_dedup:
+        append_seen(seen_path, new_place_ids)
+        log.info("Recorded %d new place_ids to %s", len(new_place_ids), seen_path)
+
     return out_path
 
 
@@ -470,8 +509,9 @@ def main() -> None:
     parser.add_argument("--type", required=True, help="Business type, e.g. 'music school'")
     parser.add_argument("--location", required=True, help="Location, e.g. 'Sydney'")
     parser.add_argument("--limit", type=int, default=20, help="Max businesses to process")
+    parser.add_argument("--no-dedup", action="store_true", help="Ignore the seen-list and don't update it")
     args = parser.parse_args()
-    out = run(args.type, args.location, args.limit)
+    out = run(args.type, args.location, args.limit, no_dedup=args.no_dedup)
     print(out)
 
 
